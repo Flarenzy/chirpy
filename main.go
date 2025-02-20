@@ -2,14 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/Flarenzy/chirpy/internal/logging"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
+)
+
+const (
+	PSQL_DB_URL = "postgres://bdimic:@localhost:5432/chirpy"
 )
 
 type apiConfig struct {
@@ -36,15 +43,90 @@ func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) metrics(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	htmlTemplate := `
+<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+  </body>
+</html>
+`
+	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
 	val := cfg.fileserverHits.Load()
-	msg := fmt.Sprintf("Hits: %v", val)
+	msg := fmt.Sprintf(htmlTemplate, val)
 	_, err := w.Write([]byte(msg))
 	if err != nil {
 		fmt.Println("Error writing response in metrics")
 		return
 	}
+}
+
+type Chirp struct {
+	Body string `json:"body"`
+}
+
+func cleanChirp(chirp string) string {
+	profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
+	var newChirpWords []string
+	for _, c := range strings.Fields(chirp) {
+		var newWord string
+		for _, word := range profaneWords {
+			if strings.ToLower(c) == word {
+				newWord = "****"
+				break
+			} else {
+				newWord = c
+			}
+		}
+		newChirpWords = append(newChirpWords, newWord)
+	}
+	newChirp := strings.Join(newChirpWords, " ")
+	return newChirp
+
+}
+
+func validateChirp(w http.ResponseWriter, r *http.Request) {
+	var chirp Chirp
+	type cleanedChirp struct {
+		CleanedBody string `json:"cleaned_body"`
+	}
+	body, err := io.ReadAll(r.Body)
+
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			fmt.Println("Error closing body")
+		}
+	}(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("bad request"))
+	}
+	err = json.Unmarshal(body, &chirp)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request, incorrect json"))
+	}
+	chirp.Body = cleanChirp(chirp.Body)
+	if len(chirp.Body) > 140 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Chirp is too long"))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	var resp cleanedChirp
+	resp.CleanedBody = chirp.Body
+	buf, err := json.Marshal(resp)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+	}
+	_, err = w.Write(buf)
+	if err != nil {
+		fmt.Println("Error writing response in /validate_chirp")
+	}
+
 }
 
 func main() {
@@ -70,8 +152,9 @@ func main() {
 		}
 
 	}))
-	mux.HandleFunc("GET /api/metrics", apiCfg.metrics)
-	mux.HandleFunc("POST /api/reset", apiCfg.reset)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.metrics)
+	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
+	mux.HandleFunc("POST /api/validate_chirp", validateChirp)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -79,7 +162,7 @@ func main() {
 		os.Exit(0)
 	}()
 	fmt.Println("Listening on", server.Addr)
-	err := server.ListenAndServe()
+	err = server.ListenAndServe()
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
