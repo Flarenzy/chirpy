@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/Flarenzy/chirpy/internal/database"
 	"github.com/Flarenzy/chirpy/internal/logging"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,13 +20,15 @@ import (
 	"syscall"
 )
 
-const (
-	PSQL_DB_URL = "postgres://bdimic:@localhost:5432/chirpy"
-)
+func validEmail(email string) bool {
+	_, err := mail.ParseAddress(email)
+	return err == nil
+}
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	logger         *slog.Logger
+	dbQueries      *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -31,7 +38,7 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
-func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) reset(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	cfg.fileserverHits.Store(0)
@@ -42,7 +49,7 @@ func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (cfg *apiConfig) metrics(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) metrics(w http.ResponseWriter, _ *http.Request) {
 	htmlTemplate := `
 <html>
   <body>
@@ -130,10 +137,23 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Error loading .env file")
+		return
+	}
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		fmt.Println("Error connecting to database")
+		return
+	}
+	dbQueries := database.New(db)
 	log, f, err := logging.NewLogger("chirpy.log", slog.LevelDebug)
 	defer f.Close()
 	apiCfg := apiConfig{
-		logger: log,
+		logger:    log,
+		dbQueries: dbQueries,
 	}
 	mux := http.NewServeMux()
 	server := &http.Server{
