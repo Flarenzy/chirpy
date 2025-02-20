@@ -27,6 +27,14 @@ func validEmail(email string) bool {
 	return err == nil
 }
 
+type respChirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
+
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	logger         *slog.Logger
@@ -140,7 +148,8 @@ func (cfg *apiConfig) metrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 type Chirp struct {
-	Body string `json:"body"`
+	Body   string    `json:"body"`
+	UserId uuid.UUID `json:"user_id"`
 }
 
 func cleanChirp(chirp string) string {
@@ -163,13 +172,9 @@ func cleanChirp(chirp string) string {
 
 }
 
-func validateChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	var chirp Chirp
-	type cleanedChirp struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
 	body, err := io.ReadAll(r.Body)
-
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
@@ -178,32 +183,77 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 	}(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("bad request"))
+		_, _ = w.Write([]byte("bad request"))
 	}
 	err = json.Unmarshal(body, &chirp)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte("bad request, incorrect json"))
+		return
 	}
-	chirp.Body = cleanChirp(chirp.Body)
 	if len(chirp.Body) > 140 {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte("Chirp is too long"))
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	var resp cleanedChirp
-	resp.CleanedBody = chirp.Body
-	buf, err := json.Marshal(resp)
+	chirp.Body = cleanChirp(chirp.Body)
+	var chirpParams database.CreateChirpParams
+	chirpParams.Body = chirp.Body
+	chirpParams.UserID = chirp.UserId
+
+	ctx := r.Context()
+	createChirp, err := cfg.dbQueries.CreateChirp(ctx, chirpParams)
+	if err != nil {
+		cfg.logger.Error("Error creating chirp", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+		return
+	}
+	var rChirp respChirp
+	rChirp.ID = createChirp.ID
+	rChirp.CreatedAt = createChirp.CreatedAt
+	rChirp.UpdatedAt = createChirp.UpdatedAt
+	rChirp.Body = createChirp.Body
+	rChirp.UserID = createChirp.UserID
+	buf, err := json.Marshal(rChirp)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal server error"))
+		_, _ = w.Write([]byte("internal server error"))
+		return
 	}
-	_, err = w.Write(buf)
-	if err != nil {
-		fmt.Println("Error writing response in /validate_chirp")
-	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write(buf)
 
+}
+
+func (cfg *apiConfig) getAllChirp(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	chirps, err := cfg.dbQueries.GetAllChirps(ctx)
+	var respChirps []respChirp
+	for _, chirp := range chirps {
+		var rChirp respChirp
+		rChirp.ID = chirp.ID
+		rChirp.CreatedAt = chirp.CreatedAt
+		rChirp.UpdatedAt = chirp.UpdatedAt
+		rChirp.Body = chirp.Body
+		rChirp.UserID = chirp.UserID
+		respChirps = append(respChirps, rChirp)
+	}
+	if err != nil {
+		cfg.logger.Error("Error getting all chirps", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(respChirps)
+	if err != nil {
+		cfg.logger.Error("Error encoding response", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+	}
 }
 
 func main() {
@@ -246,8 +296,9 @@ func main() {
 	}))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("POST /api/users", apiCfg.registerUser)
+	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirp)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
