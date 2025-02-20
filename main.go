@@ -256,6 +256,39 @@ func (cfg *apiConfig) getAllChirp(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	chirpId := r.PathValue("chirp_id")
+	chirpUUID, err := uuid.Parse(chirpId)
+	if err != nil {
+		cfg.logger.Error("Error getting chirp UUID", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+		return
+	}
+	var rChirp respChirp
+	chirp, err := cfg.dbQueries.GetChirpByID(ctx, chirpUUID)
+	if err != nil {
+		cfg.logger.Error("Error getting chirp from DB", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+		return
+	}
+	rChirp.ID = chirp.ID
+	rChirp.CreatedAt = chirp.CreatedAt
+	rChirp.UpdatedAt = chirp.UpdatedAt
+	rChirp.Body = chirp.Body
+	rChirp.UserID = chirp.UserID
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(rChirp)
+	if err != nil {
+		cfg.logger.Error("Error encoding response", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+	}
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -299,6 +332,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("POST /api/users", apiCfg.registerUser)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirp)
+	mux.HandleFunc("GET /api/chirps/{chirp_id}", apiCfg.getChirpById)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
