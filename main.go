@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/Flarenzy/chirpy/internal/auth"
 	"github.com/Flarenzy/chirpy/internal/database"
 	"github.com/Flarenzy/chirpy/internal/logging"
 	"github.com/google/uuid"
@@ -25,6 +26,18 @@ import (
 func validEmail(email string) bool {
 	_, err := mail.ParseAddress(email)
 	return err == nil
+}
+
+type RespUser struct {
+	Id        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+type RegisterUser struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type respChirp struct {
@@ -51,9 +64,7 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func (cfg *apiConfig) registerUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	type RegisterUser struct {
-		Email string `json:"email"`
-	}
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		cfg.logger.Error("Error parsing body", "error", err.Error())
@@ -76,22 +87,31 @@ func (cfg *apiConfig) registerUser(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt time.Time `json:"updated_at"`
 		Email     string    `json:"email"`
 	}
-	resp, err := cfg.dbQueries.CreateUser(ctx, sql.NullString{
+	var createUserParams database.CreateUserParams
+	createUserParams.Email = sql.NullString{
 		String: user.Email,
 		Valid:  true,
-	})
+	}
+	createUserParams.HashedPassword, err = auth.HashPassword(user.Password)
+	if err != nil {
+		cfg.logger.Error("Error hashing password", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("wrong request body"))
+		return
+	}
+	resp, err := cfg.dbQueries.CreateUser(ctx, createUserParams)
 
 	if err != nil {
 		cfg.logger.Error("Error creating user", "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal server error"))
+		_, _ = w.Write([]byte("internal server error"))
 		return
 	}
 	respUser := RespUser{
 		ID:        resp.ID,
 		CreatedAt: resp.CreatedAt,
 		UpdatedAt: resp.UpdatedAt,
-		Email:     user.Email,
+		Email:     resp.Email.String,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -99,7 +119,7 @@ func (cfg *apiConfig) registerUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		cfg.logger.Error("Error encoding response", "error", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal server error"))
+		_, _ = w.Write([]byte("internal server error"))
 		return
 	}
 }
@@ -289,6 +309,55 @@ func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var logUser RegisterUser
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		cfg.logger.Error("Error reading body", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+		return
+	}
+	err = json.Unmarshal(body, &logUser)
+	if err != nil {
+		cfg.logger.Error("Error unmarshalling body in loginUser", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+		return
+	}
+	usr, err := cfg.dbQueries.GetUserByEmail(ctx, sql.NullString{
+		String: logUser.Email,
+		Valid:  true,
+	})
+	if err != nil {
+		cfg.logger.Error("Error getting user by email", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("Incorrect email or password"))
+		return
+	}
+	if !auth.CheckPasswordHash(logUser.Password, usr.HashedPassword) {
+		cfg.logger.Error("Error getting user by email", "error", "Incorrect password")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("Incorrect email or password"))
+		return
+	}
+	var respUser RespUser
+	respUser.Id = usr.ID
+	respUser.CreatedAt = usr.CreatedAt
+	respUser.UpdatedAt = usr.UpdatedAt
+	respUser.Email = usr.Email.String
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(respUser)
+	if err != nil {
+		cfg.logger.Error("Error encoding response loginUser", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+	}
+
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -333,6 +402,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.registerUser)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirp)
 	mux.HandleFunc("GET /api/chirps/{chirp_id}", apiCfg.getChirpById)
+	mux.HandleFunc("POST /api/login", apiCfg.loginUser)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
