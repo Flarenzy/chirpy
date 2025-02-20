@@ -6,3 +6,6 @@ VALUES (
         NOW() at time zone 'utc',
         $1
        ) RETURNING *;
+
+-- name: DeleteAllUsers :exec
+DELETE FROM users;

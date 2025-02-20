@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/Flarenzy/chirpy/internal/database"
 	"github.com/Flarenzy/chirpy/internal/logging"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 func validEmail(email string) bool {
@@ -29,6 +31,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	logger         *slog.Logger
 	dbQueries      *database.Queries
+	platform       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -38,11 +41,78 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
-func (cfg *apiConfig) reset(w http.ResponseWriter, _ *http.Request) {
+func (cfg *apiConfig) registerUser(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	type RegisterUser struct {
+		Email string `json:"email"`
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		cfg.logger.Error("Error parsing body", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("wrong request body"))
+		return
+	}
+	defer r.Body.Close()
+	var user RegisterUser
+	err = json.Unmarshal(body, &user)
+	if err != nil {
+		cfg.logger.Error("Error unmarshaling body", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("wrong request body"))
+		return
+	}
+	type RespUser struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}
+	resp, err := cfg.dbQueries.CreateUser(ctx, sql.NullString{
+		String: user.Email,
+		Valid:  true,
+	})
+
+	if err != nil {
+		cfg.logger.Error("Error creating user", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+		return
+	}
+	respUser := RespUser{
+		ID:        resp.ID,
+		CreatedAt: resp.CreatedAt,
+		UpdatedAt: resp.UpdatedAt,
+		Email:     user.Email,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	err = json.NewEncoder(w).Encode(respUser)
+	if err != nil {
+		cfg.logger.Error("Error encoding response", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+		return
+	}
+}
+
+func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
+	if cfg.platform != "dev" {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	ctx := r.Context()
+	err := cfg.dbQueries.DeleteAllUsers(ctx)
+	if err != nil {
+		cfg.logger.Error("Error deleting all users", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	cfg.fileserverHits.Store(0)
-	_, err := w.Write([]byte("Metric value reset"))
+	_, err = w.Write([]byte("all values reset"))
 	if err != nil {
 		fmt.Println("Error writing response in /reset")
 		return
@@ -143,6 +213,7 @@ func main() {
 		return
 	}
 	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Println("Error connecting to database")
@@ -154,6 +225,7 @@ func main() {
 	apiCfg := apiConfig{
 		logger:    log,
 		dbQueries: dbQueries,
+		platform:  platform,
 	}
 	mux := http.NewServeMux()
 	server := &http.Server{
@@ -175,6 +247,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
 	mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	mux.HandleFunc("POST /api/users", apiCfg.registerUser)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
