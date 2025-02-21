@@ -6,7 +6,7 @@ VALUES (
         NOW() at time zone 'utc',
         $1,
         $2
-       ) RETURNING id, created_at, updated_at, email;
+       ) RETURNING id, created_at, updated_at, email, is_chirpy_red;
 
 -- name: DeleteAllUsers :exec
 DELETE FROM users;
@@ -23,4 +23,9 @@ WHERE id = $1;
 UPDATE users
 SET email = $1, hashed_password = $2, updated_at = NOW() AT TIME ZONE 'utc'
 WHERE id = $3
-RETURNING id, created_at, updated_at, email;
+RETURNING id, created_at, updated_at, email, is_chirpy_red;
+
+-- name: UpdateUserToChirpyRed :exec
+UPDATE users
+SET is_chirpy_red = true
+WHERE id = $1;
