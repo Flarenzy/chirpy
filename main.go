@@ -34,8 +34,8 @@ type RespUser struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	Email        string    `json:"email"`
-	Token        string    `json:"token"`
-	RefreshToken string    `json:"refresh_token"`
+	Token        string    `json:"token,omitempty"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
 }
 
 type RegisterUser struct {
@@ -74,7 +74,7 @@ func (cfg *apiConfig) registerUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		cfg.logger.Error("Error parsing body", "error", err.Error())
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("wrong request body"))
+		_, _ = w.Write([]byte("wrong request body"))
 		return
 	}
 	defer r.Body.Close()
@@ -84,6 +84,11 @@ func (cfg *apiConfig) registerUser(w http.ResponseWriter, r *http.Request) {
 		cfg.logger.Error("Error unmarshaling body", "error", err.Error())
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("wrong request body"))
+		return
+	}
+	if !validEmail(user.Email) || user.Password == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("wrong request body"))
 		return
 	}
 	type RespUser struct {
@@ -147,7 +152,9 @@ func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 	_, err = w.Write([]byte("all values reset"))
 	if err != nil {
-		fmt.Println("Error writing response in /reset")
+		cfg.logger.Error("Error writing response in /reset")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
 		return
 	}
 }
@@ -167,7 +174,9 @@ func (cfg *apiConfig) metrics(w http.ResponseWriter, _ *http.Request) {
 	msg := fmt.Sprintf(htmlTemplate, val)
 	_, err := w.Write([]byte(msg))
 	if err != nil {
-		fmt.Println("Error writing response in metrics")
+		cfg.logger.Error("Error writing response in metrics")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
 		return
 	}
 }
@@ -216,7 +225,7 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			fmt.Println("Error closing body")
+			cfg.logger.Error("Error closing body")
 		}
 	}(r.Body)
 	if err != nil {
@@ -409,7 +418,6 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) refreshAccessToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	fmt.Println(r.Header.Get("Authorization"))
 	bearerToken, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		cfg.logger.Error("Error getting bearer token", "error", err.Error())
@@ -472,6 +480,88 @@ func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.logger.Error("Error getting bearer token in updateUser", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	userID, err := auth.ValidateJWT(bearerToken, cfg.tokenSecret)
+	if err != nil {
+		cfg.logger.Error("Error validating bearer token in updateUser", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	usr, err := cfg.dbQueries.GetUserByID(ctx, userID)
+	if err != nil {
+		cfg.logger.Error("Error getting user by ID in updateUser", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+		return
+	}
+	var newUser RegisterUser
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		cfg.logger.Error("Error reading body in updateUser", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	err = json.Unmarshal(body, &newUser)
+	if err != nil {
+		cfg.logger.Error("Error unmarshalling body in updateUser", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	if newUser.Email == "" || newUser.Password == "" || !validEmail(newUser.Email) {
+		cfg.logger.Error("invalid username or password", "error", errors.New("invalid username or password"))
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("invalid username or password"))
+		return
+	}
+	hashedPassword, err := auth.HashPassword(newUser.Password)
+	if err != nil {
+		cfg.logger.Error("Error hashing password in updateUser", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+		return
+	}
+	updatedUser, err := cfg.dbQueries.UpdateUserEmailAndPassword(ctx, database.UpdateUserEmailAndPasswordParams{
+		Email: sql.NullString{
+			String: newUser.Email,
+			Valid:  true,
+		},
+		HashedPassword: hashedPassword,
+		ID:             usr.ID,
+	})
+	if err != nil {
+		cfg.logger.Error("Error updating user in updateUser", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+		return
+	}
+	var respUser RespUser
+	respUser.Id = updatedUser.ID
+	respUser.Email = newUser.Email
+	respUser.UpdatedAt = updatedUser.UpdatedAt
+	respUser.CreatedAt = updatedUser.CreatedAt
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(respUser)
+	if err != nil {
+		cfg.logger.Error("Error marshalling body in updateUser", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+		return
+	}
+
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -521,6 +611,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.loginUser)
 	mux.HandleFunc("POST /api/refresh", apiCfg.refreshAccessToken)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
+	mux.HandleFunc("PUT /api/users", apiCfg.updateUser)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
