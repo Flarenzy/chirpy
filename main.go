@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/Flarenzy/chirpy/internal/auth"
 	"github.com/Flarenzy/chirpy/internal/database"
@@ -29,11 +30,12 @@ func validEmail(email string) bool {
 }
 
 type RespUser struct {
-	Id        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	Id           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 type RegisterUser struct {
@@ -344,11 +346,7 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("bad request"))
 		return
 	}
-	if logUser.ExpiresInSeconds != int64(0) &&
-		logUser.ExpiresInSeconds > int64(0) &&
-		logUser.ExpiresInSeconds < int64(expiration.Seconds()) {
-		expiration = time.Duration(logUser.ExpiresInSeconds) * time.Second
-	}
+
 	usr, err := cfg.dbQueries.GetUserByEmail(ctx, sql.NullString{
 		String: logUser.Email,
 		Valid:  true,
@@ -373,12 +371,30 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("Internal server error"))
 		return
 	}
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		cfg.logger.Error("Error creating refresh token in login request", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Internal server error"))
+		return
+	}
+	var createRefreshTokenParams database.CreateRefreshTokenParams
+	createRefreshTokenParams.UserID = usr.ID
+	createRefreshTokenParams.Token = refreshToken
+	_, err = cfg.dbQueries.CreateRefreshToken(ctx, createRefreshTokenParams)
+	if err != nil {
+		cfg.logger.Error("Error creating refresh token in login request", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Internal server error"))
+		return
+	}
 	var respUser RespUser
 	respUser.Id = usr.ID
 	respUser.CreatedAt = usr.CreatedAt
 	respUser.UpdatedAt = usr.UpdatedAt
 	respUser.Email = usr.Email.String
 	respUser.Token = jwt
+	respUser.RefreshToken = refreshToken
 	cfg.logger.Info("Logged in user", "user", respUser)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -389,6 +405,71 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("internal server error"))
 	}
 
+}
+
+func (cfg *apiConfig) refreshAccessToken(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	fmt.Println(r.Header.Get("Authorization"))
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.logger.Error("Error getting bearer token", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	usr, err := cfg.dbQueries.GetUserFromRefreshToken(ctx, bearerToken)
+	if err != nil {
+		cfg.logger.Error("Error getting user from refresh token", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	if usr.RevokedAt.Valid {
+		cfg.logger.Error("Token revoked at", "time", usr.RevokedAt.Time)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	if time.Now().UTC().After(usr.ExpiresAt) {
+		cfg.logger.Error("Token expired", "error", errors.New("Token expired"), "token", bearerToken)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	jwt, err := auth.MakeJWT(usr.ID, cfg.tokenSecret, time.Hour)
+	if err != nil {
+		cfg.logger.Error("Error creating JWT in refresh token", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Internal server error"))
+		return
+	}
+	type returnToken struct {
+		Token string `json:"token"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(returnToken{
+		Token: jwt,
+	})
+}
+
+func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.logger.Error("Error getting bearer token", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	err = cfg.dbQueries.RevokeRefreshToken(ctx, bearerToken)
+	if err != nil {
+		cfg.logger.Error("Error revoking refresh token", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
@@ -438,6 +519,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirp)
 	mux.HandleFunc("GET /api/chirps/{chirp_id}", apiCfg.getChirpById)
 	mux.HandleFunc("POST /api/login", apiCfg.loginUser)
+	mux.HandleFunc("POST /api/refresh", apiCfg.refreshAccessToken)
+	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

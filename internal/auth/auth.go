@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -30,8 +32,8 @@ func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (str
 	signedToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
 		Issuer:    "chirpy",
 		Subject:   userID.String(),
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiresIn)),
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
+		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(expiresIn)),
+		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
 	}).SignedString([]byte(tokenSecret))
 	if err != nil {
 		return "", err
@@ -68,4 +70,13 @@ func GetBearerToken(headers http.Header) (string, error) {
 	}
 	return strings.TrimSpace(tokenString), nil
 
+}
+
+func MakeRefreshToken() (string, error) {
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
