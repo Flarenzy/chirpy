@@ -648,6 +648,28 @@ func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) polkaWebhookUpdateUserToChirpyRed(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	apiKey, err := auth.GetApiKey(r.Header)
+	if err != nil {
+		cfg.logger.Error("Error getting api key in polkaWebhookUpdateUserToChirpyRed", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "unauthorized",
+		})
+		return
+	}
+	if cfg.polkaApiKey != apiKey {
+		cfg.logger.Error("wrong api key in polkaWebhookUpdateUserToChirpyRed",
+			"apiKey", apiKey, "expected", cfg.polkaApiKey)
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "unauthorized",
+		})
+		return
+	}
 	var polkaWebhook PolkaWebhook
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -711,6 +733,7 @@ func main() {
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	tokenSecret := os.Getenv("TOKEN_SECRET")
+	polkaAPIKey := os.Getenv("POLKA_API_KEY")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Println("Error connecting to database")
@@ -724,6 +747,7 @@ func main() {
 		dbQueries:   dbQueries,
 		platform:    platform,
 		tokenSecret: tokenSecret,
+		polkaApiKey: polkaAPIKey,
 	}
 	mux := http.NewServeMux()
 	server := &http.Server{

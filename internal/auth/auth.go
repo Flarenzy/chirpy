@@ -80,3 +80,15 @@ func MakeRefreshToken() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+func GetApiKey(headers http.Header) (string, error) {
+	headerString := headers.Get("Authorization")
+	if headerString == "" {
+		return "", errors.New("authorization header not found")
+	}
+	tokenString, found := strings.CutPrefix(headerString, "ApiKey")
+	if !found {
+		return "", errors.New("invalid token")
+	}
+	return strings.TrimSpace(tokenString), nil
+}
