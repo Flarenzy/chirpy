@@ -603,11 +603,11 @@ func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
 	chirp, err := cfg.dbQueries.GetChirpByID(ctx, chirpID)
 	if err != nil {
 		cfg.logger.Error("Error getting chirp by ID in deleteChirp", "error", err.Error(), "id", chirpID)
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(struct {
 			Status string `json:"status"`
 		}{
-			Status: "bad request",
+			Status: "not found",
 		})
 		return
 	}
