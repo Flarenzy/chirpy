@@ -317,8 +317,12 @@ func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
 	chirp, err := cfg.dbQueries.GetChirpByID(ctx, chirpUUID)
 	if err != nil {
 		cfg.logger.Error("Error getting chirp from DB", "error", err.Error())
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte("bad request"))
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "not found",
+		})
 		return
 	}
 	rChirp.ID = chirp.ID
@@ -559,7 +563,77 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("internal server error"))
 		return
 	}
+}
 
+func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		cfg.logger.Error("Error parsing chirp ID in deleteChirp", "error", err.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "bad request",
+		})
+		return
+	}
+	ctx := r.Context()
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.logger.Error("Error getting bearer token in deleteChirp", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "unauthorized",
+		})
+		return
+	}
+	usr, err := auth.ValidateJWT(bearerToken, cfg.tokenSecret)
+	if err != nil {
+		cfg.logger.Error("Error validating bearer token in deleteChirp", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "bad request",
+		})
+		return
+	}
+	chirp, err := cfg.dbQueries.GetChirpByID(ctx, chirpID)
+	if err != nil {
+		cfg.logger.Error("Error getting chirp by ID in deleteChirp", "error", err.Error(), "id", chirpID)
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "bad request",
+		})
+		return
+	}
+	if chirp.UserID != usr {
+		cfg.logger.Error("Error unauthorized user trying to delete chirp  in deleteChirp",
+			"error", errors.New("unauthorized"), "id", usr, "chirpID", chirp.ID)
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "forbidden",
+		})
+		return
+	}
+	err = cfg.dbQueries.DeleteChirpById(ctx, chirp.ID)
+	if err != nil {
+		cfg.logger.Error("Error deleting chirp in deleteChirp", "error", err.Error(), "chirpID", chirp.ID)
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(struct {
+			Status string `json:"status"`
+		}{
+			Status: "chirp not found",
+		})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
@@ -612,6 +686,7 @@ func main() {
 	mux.HandleFunc("POST /api/refresh", apiCfg.refreshAccessToken)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
 	mux.HandleFunc("PUT /api/users", apiCfg.updateUser)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirp)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
