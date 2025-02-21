@@ -33,11 +33,13 @@ type RespUser struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 type RegisterUser struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	ExpiresInSeconds int64  `json:"expires_in_seconds,omitempty"`
 }
 
 type respChirp struct {
@@ -53,6 +55,7 @@ type apiConfig struct {
 	logger         *slog.Logger
 	dbQueries      *database.Queries
 	platform       string
+	tokenSecret    string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -193,6 +196,19 @@ func cleanChirp(chirp string) string {
 }
 
 func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.logger.Error("Error getting bearer token", "error", err.Error())
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	userID, err := auth.ValidateJWT(bearerToken, cfg.tokenSecret)
+	if err != nil {
+		cfg.logger.Error("Error validating jwt token", "error", err.Error())
+		cfg.logger.Error("The jwt token is", "token", bearerToken)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 	var chirp Chirp
 	body, err := io.ReadAll(r.Body)
 	defer func(Body io.ReadCloser) {
@@ -219,7 +235,7 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	chirp.Body = cleanChirp(chirp.Body)
 	var chirpParams database.CreateChirpParams
 	chirpParams.Body = chirp.Body
-	chirpParams.UserID = chirp.UserId
+	chirpParams.UserID = userID
 
 	ctx := r.Context()
 	createChirp, err := cfg.dbQueries.CreateChirp(ctx, chirpParams)
@@ -311,6 +327,8 @@ func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	expiration := time.Hour
+	cfg.logger.Debug("Login User", "expiration", expiration)
 	var logUser RegisterUser
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -325,6 +343,11 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte("bad request"))
 		return
+	}
+	if logUser.ExpiresInSeconds != int64(0) &&
+		logUser.ExpiresInSeconds > int64(0) &&
+		logUser.ExpiresInSeconds < int64(expiration.Seconds()) {
+		expiration = time.Duration(logUser.ExpiresInSeconds) * time.Second
 	}
 	usr, err := cfg.dbQueries.GetUserByEmail(ctx, sql.NullString{
 		String: logUser.Email,
@@ -342,11 +365,21 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("Incorrect email or password"))
 		return
 	}
+	cfg.logger.Info("Successfully logged in", "email", logUser.Email, "duration", expiration)
+	jwt, err := auth.MakeJWT(usr.ID, cfg.tokenSecret, expiration)
+	if err != nil {
+		cfg.logger.Error("Error creating JWT in login request", "error", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Internal server error"))
+		return
+	}
 	var respUser RespUser
 	respUser.Id = usr.ID
 	respUser.CreatedAt = usr.CreatedAt
 	respUser.UpdatedAt = usr.UpdatedAt
 	respUser.Email = usr.Email.String
+	respUser.Token = jwt
+	cfg.logger.Info("Logged in user", "user", respUser)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	err = json.NewEncoder(w).Encode(respUser)
@@ -366,6 +399,7 @@ func main() {
 	}
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	tokenSecret := os.Getenv("TOKEN_SECRET")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Println("Error connecting to database")
@@ -375,9 +409,10 @@ func main() {
 	log, f, err := logging.NewLogger("chirpy.log", slog.LevelDebug)
 	defer f.Close()
 	apiCfg := apiConfig{
-		logger:    log,
-		dbQueries: dbQueries,
-		platform:  platform,
+		logger:      log,
+		dbQueries:   dbQueries,
+		platform:    platform,
+		tokenSecret: tokenSecret,
 	}
 	mux := http.NewServeMux()
 	server := &http.Server{

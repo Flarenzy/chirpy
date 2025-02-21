@@ -2,6 +2,8 @@ package auth
 
 import (
 	"github.com/google/uuid"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -130,5 +132,45 @@ func TestWrongTokenSecret(t *testing.T) {
 		if err.Error() != "token is malformed: could not JSON decode header: invalid character '\\u009e' looking for beginning of value" {
 			t.Errorf("Expected that the token is malformed %v", err)
 		}
+	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("Authorization", "Bearer   secret   ")
+	token, err := GetBearerToken(r.Header)
+	if err != nil {
+		t.Errorf("Error getting token: %v", err)
+		return
+	}
+	if token != "secret" {
+		t.Errorf("Expected token to be 'secret', got %v", token)
+	}
+}
+
+func TestGetBearerTokenInvalid(t *testing.T) {
+	t.Parallel()
+	testData := []struct {
+		testName    string
+		tokenValue  string
+		expectedErr string
+	}{
+		{"TestGetBearerTokenNoSecret", "", "authorization header not found"},
+		{"TestGetBearerTokenInvalidSecret", "Some invalid token", "invalid token"},
+		{"TestGetBearerTokenOnlyWhiteSpace", "\n \t\n", "invalid token"},
+	}
+	for _, data := range testData {
+		t.Run(data.testName, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.Header.Set("Authorization", data.tokenValue)
+			_, err := GetBearerToken(r.Header)
+			if err != nil {
+				if err.Error() != data.expectedErr {
+					t.Errorf("Expected: %v got: %v", data.expectedErr, err)
+				}
+			}
+
+		})
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"net/http"
+	"strings"
 	"time"
 )
 
@@ -53,4 +55,17 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 		return uuid.Nil, err
 	}
 	return tokenID, nil
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	headerString := headers.Get("Authorization")
+	if headerString == "" {
+		return "", errors.New("authorization header not found")
+	}
+	tokenString, found := strings.CutPrefix(headerString, "Bearer")
+	if !found {
+		return "", errors.New("invalid token")
+	}
+	return strings.TrimSpace(tokenString), nil
+
 }
